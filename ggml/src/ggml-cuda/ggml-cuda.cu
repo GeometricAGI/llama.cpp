@@ -32,6 +32,8 @@
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
+#include "ggml-cuda/rocmfp3_mix.cuh"
+#include "ggml-cuda/rocmfp2_mix.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
 #include "ggml-cuda/opt-step-sgd.cuh"
@@ -1830,6 +1832,77 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     const int cc        = ggml_cuda_info().devices[ctx.device].cc;
     const int warp_size = ggml_cuda_info().devices[ctx.device].warp_size;
 
+    // ROCmFPX mix qtypes (105/106): fused decode paths. These types cannot go
+    // through MMVQ/MMQ at all -- their learned per-expert codebooks live in a side
+    // registry the block-local quant kernels know nothing about (mmvq.cu returns
+    // 0/false for them) -- so without these hooks every matvec pays the
+    // dequantize->cuBLAS round-trip, which reads MORE bytes than the f16 weight it
+    // replaced. The launchers return false when the tensor base is not registered,
+    // in which case we fall through to the generic (dequant->cuBLAS) chain.
+    // DFLASH_MIX_FUSED=0 forces the dequant->cuBLAS fallback (A/B against the
+    // fused path on the same binary). Default on.
+    const bool is_rocmfp3_mix = src0->type == GGML_TYPE_Q3_1_ROCMFP3_MIX;
+    const bool is_rocmfp2_mix = src0->type == GGML_TYPE_Q2_1_ROCMFP2_MIX;
+    const bool is_mix_qtype   = is_rocmfp3_mix || is_rocmfp2_mix;
+    static const bool mix_fused_on = []() {
+        const char * e = getenv("DFLASH_MIX_FUSED");
+        return e ? atoi(e) != 0 : true;
+    }();
+
+    // 2-D batch-1..MMVQ-width decode matvec (also catches the mul_mat_id
+    // per-expert fallback, which re-enters here with a mix-qtype src0 slice).
+    if (mix_fused_on && is_mix_qtype
+            && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)
+            && src1->ne[2] == 1 && src1->ne[3] == 1
+            && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE) {
+        const bool handled = is_rocmfp3_mix
+            ? ggml_cuda_rocmfp3_mix_mul_mat_vec(
+                  src0->data, (const float *) src1->data, (float *) dst->data,
+                  (int) src0->ne[0], (int) src0->ne[1], (int) src1->ne[1],
+                  (int64_t) (src1->nb[1] / sizeof(float)),
+                  (int64_t) (dst->nb[1] / sizeof(float)), ctx.stream())
+            : ggml_cuda_rocmfp2_mix_mul_mat_vec(
+                  src0->data, (const float *) src1->data, (float *) dst->data,
+                  (int) src0->ne[0], (int) src0->ne[1], (int) src1->ne[1],
+                  (int64_t) (src1->nb[1] / sizeof(float)),
+                  (int64_t) (dst->nb[1] / sizeof(float)), ctx.stream());
+        if (handled) {
+            return;
+        }
+    }
+
+    // 3-D batched slice (e.g. a weight reshaped to [in, out/g, g] and mul_mat'd
+    // against a matching 3-D src1): the 2-D hook above rejects it on
+    // src1->ne[2] == 1, and falling through is not neutral for a mix qtype (the
+    // generic chain ends at dequant->cuBLAS). One slice per blockIdx.y; requires
+    // the tensor registered with n_experts >= nslices.
+    // ne[1] is the token count here (not a column batch), so no ncols cap applies.
+    if (mix_fused_on && is_mix_qtype
+            && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)
+            && src1->ne[3] == 1 && src0->ne[3] == 1
+            && src1->ne[2] > 1 && src0->ne[2] == src1->ne[2]) {
+        const int    nslices = (int) src0->ne[2];
+        const int    ntokens = (int) src1->ne[1];
+        // ne[1] is the token dim and ne[2] the slice dim, so nb[1]/nb[2] are the TOKEN
+        // and SLICE strides. The callee names its parameters accordingly; do not reorder.
+        const int64_t s1_tok = (int64_t) (src1->nb[1] / sizeof(float));
+        const int64_t s1_sl  = (int64_t) (src1->nb[2] / sizeof(float));
+        const int64_t d_tok  = (int64_t) (dst->nb[1]  / sizeof(float));
+        const int64_t d_sl   = (int64_t) (dst->nb[2]  / sizeof(float));
+        const bool handled = is_rocmfp3_mix
+            ? ggml_cuda_rocmfp3_mix_mul_mat_vec_3d(
+                  src0->data, (const float *) src1->data, (float *) dst->data,
+                  (int) src0->ne[0], (int) src0->ne[1], nslices, ntokens,
+                  s1_tok, s1_sl, d_tok, d_sl, ctx.stream())
+            : ggml_cuda_rocmfp2_mix_mul_mat_vec_3d(
+                  src0->data, (const float *) src1->data, (float *) dst->data,
+                  (int) src0->ne[0], (int) src0->ne[1], nslices, ntokens,
+                  s1_tok, s1_sl, d_tok, d_sl, ctx.stream());
+        if (handled) {
+            return;
+        }
+    }
+
     if (ggml_cuda_should_use_mmvf(src0->type, cc, src0->ne, src0->nb, ne11)) {
         // The custom F16 vector kernel can be used over batched cuBLAS GEMM.
         // But this is only faster for GPUs without tensor cores or with a thin src0 matrix (particularly KQV in attention)
@@ -1876,6 +1949,46 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     GGML_TENSOR_BINARY_OP_LOCALS
 
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+
+    // ROCmFPX mix qtype (105/106) fused MoE decode: run the whole mul_mat_id on
+    // device with the routing ids read in-kernel, avoiding the generic sort-based
+    // fallback below (which needs a host cudaStreamSynchronize + id-sort that
+    // serialises decode and disables CUDA-graph capture of the FFN subgraph).
+    // Bit-identical per output element to the fallback's per-expert-slice path.
+    // Gated to the strict single-token decode case (ne12 == 1), where the fallback
+    // also runs every used expert through the fused f32 single-expert kernel
+    // (tokens_per_expert <= 1) -- so the output is bit-identical. Multi-token
+    // batches (prefill) fall through to the dequant->cuBLAS fallback, whose f16
+    // round-trip we must NOT diverge from. The launchers return false when the
+    // tensor base is not registered. Kept in sync with the
+    // [TAG_MUL_MAT_ID_CUDA_GRAPHS] usability check in the graph-compatibility scan.
+    if (src0->type == GGML_TYPE_Q3_1_ROCMFP3_MIX
+            && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32
+            && ne12 == 1
+            && ggml_cuda_rocmfp3_mix_mul_mat_id(
+                src0->data, (const float *) src1->data, (const int32_t *) ids->data,
+                (float *) dst->data, (int) ne00, (int) ne01, (int) ids->ne[0],
+                (int) ne12, (int) ne11,
+                (int64_t) (ids->nb[0] / sizeof(int32_t)), (int64_t) (ids->nb[1] / sizeof(int32_t)),
+                (int64_t) (nb11 / sizeof(float)), (int64_t) (nb12 / sizeof(float)),
+                (int64_t) (nb1 / sizeof(float)), (int64_t) (nb2 / sizeof(float)),
+                ctx.stream())) {
+        return;
+    }
+
+    if (src0->type == GGML_TYPE_Q2_1_ROCMFP2_MIX
+            && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32
+            && ne12 == 1
+            && ggml_cuda_rocmfp2_mix_mul_mat_id(
+                src0->data, (const float *) src1->data, (const int32_t *) ids->data,
+                (float *) dst->data, (int) ne00, (int) ne01, (int) ids->ne[0],
+                (int) ne12, (int) ne11,
+                (int64_t) (ids->nb[0] / sizeof(int32_t)), (int64_t) (ids->nb[1] / sizeof(int32_t)),
+                (int64_t) (nb11 / sizeof(float)), (int64_t) (nb12 / sizeof(float)),
+                (int64_t) (nb1 / sizeof(float)), (int64_t) (nb2 / sizeof(float)),
+                ctx.stream())) {
+        return;
+    }
 
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
@@ -2523,7 +2636,22 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
         if (node->op == GGML_OP_MUL_MAT_ID) {
             const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
             const int mmvq_mmid_max = get_mmvq_mmid_max_batch(node->src[0]->type, cc);
-            if (!ggml_is_quantized(node->src[0]->type) || node->ne[2] > mmvq_mmid_max) {
+            // ROCmFPX mix qtypes take the stream-sync-free fused MoE path in
+            // ggml_cuda_mul_mat_id (no host synchronize), so they are safe to
+            // capture. Mirror that path's gate exactly, incl. the registry check,
+            // so we never skip-disable while the runtime actually falls back to
+            // the sync path. Each mix qtype has its OWN registry; dispatch on the
+            // type so a 106 node is never asked of the 105 registry.
+            const bool is_mmid_105 = node->src[0]->type == GGML_TYPE_Q3_1_ROCMFP3_MIX;
+            const bool is_mmid_106 = node->src[0]->type == GGML_TYPE_Q2_1_ROCMFP2_MIX;
+            const bool mmid_mix_ok =
+                (is_mmid_105 || is_mmid_106) &&
+                node->src[1]->type == GGML_TYPE_F32 && node->type == GGML_TYPE_F32 &&
+                node->src[1]->ne[2] == 1 &&
+                (is_mmid_105 ? ggml_cuda_rocmfp3_mix_registered(node->src[0]->data)
+                             : ggml_cuda_rocmfp2_mix_registered(node->src[0]->data));
+            if (!mmid_mix_ok &&
+                (!ggml_is_quantized(node->src[0]->type) || node->ne[2] > mmvq_mmid_max)) {
                 // under these conditions, the mul_mat_id operation will need to synchronize the stream, so we cannot use CUDA graphs
                 // TODO: figure out a way to enable for larger batch sizes, without hurting performance
                 // ref: https://github.com/ggml-org/llama.cpp/pull/18958
@@ -4931,6 +5059,13 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_IQ4_NL:
                     case GGML_TYPE_IQ4_XS:
                     case GGML_TYPE_BF16:
+                    // ROCmFPX mix qtypes: decoded by the dedicated fused kernels
+                    // (rocmfp*_mix.cu) or the registry-aware dequant->cuBLAS
+                    // fallback. Claiming support here is what keeps the scheduler
+                    // from handing these nodes to the CPU backend, whose generic
+                    // traits deliberately abort (out-of-band codebooks).
+                    case GGML_TYPE_Q3_1_ROCMFP3_MIX:
+                    case GGML_TYPE_Q2_1_ROCMFP2_MIX:
                         return true;
                     default:
                         return false;

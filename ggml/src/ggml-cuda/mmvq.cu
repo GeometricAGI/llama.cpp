@@ -247,6 +247,14 @@ static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna4(ggml_type
 
 // Host function: returns the max batch size for the current arch+type at runtime.
 int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
+    // ROCmFPX mix qtypes have no MMVQ kernel: their learned per-expert codebooks
+    // live in an out-of-band registry the block-local quant kernels cannot reach.
+    // Checked before the NVIDIA always-MMVQ shortcut below, which would otherwise
+    // route them into a kernel that does not exist. They take the dedicated fused
+    // path or the dequant->cuBLAS fallback instead.
+    if (type == GGML_TYPE_Q3_1_ROCMFP3_MIX || type == GGML_TYPE_Q2_1_ROCMFP2_MIX) {
+        return 0;
+    }
     // NVIDIA: Volta, Ada Lovelace, and Blackwell always use MMVQ for MUL_MAT_ID.
     if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
         if (cc == GGML_CUDA_CC_VOLTA || cc >= GGML_CUDA_CC_ADA_LOVELACE) {
@@ -281,6 +289,11 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
 
 bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
     if (!ggml_is_quantized(type)) {
+        return false;
+    }
+    // No MMVQ kernel for the ROCmFPX mix qtypes (out-of-band codebooks); see
+    // get_mmvq_mmid_max_batch above.
+    if (type == GGML_TYPE_Q3_1_ROCMFP3_MIX || type == GGML_TYPE_Q2_1_ROCMFP2_MIX) {
         return false;
     }
     if (GGML_CUDA_CC_IS_CDNA(cc)) {

@@ -1,5 +1,7 @@
 #include "convert.cuh"
 #include "dequantize.cuh"
+#include "rocmfp3_mix.cuh"
+#include "rocmfp2_mix.cuh"
 
 #include <cstdint>
 
@@ -563,6 +565,12 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
             return dequantize_row_nvfp4_cuda;
+        // ROCmFPX mix qtypes: the per-expert codebook lives out-of-band; these
+        // shims resolve it from the base-pointer registry (rocmfp*_mix.cu).
+        case GGML_TYPE_Q3_1_ROCMFP3_MIX:
+            return dequantize_rocmfp3_mix_to_fp16_cuda;
+        case GGML_TYPE_Q2_1_ROCMFP2_MIX:
+            return dequantize_rocmfp2_mix_to_fp16_cuda;
         case GGML_TYPE_F32:
             return convert_unary_cont_cuda<float>;
         case GGML_TYPE_BF16:
