@@ -628,6 +628,30 @@ FILE * ggml_fopen(const char * fname, const char * mode) {
 
 }
 
+// qtype 105/106 carry a per-expert LEARNED CODEBOOK out of band -- GGUF KV or the
+// loader sidecar -- which the generic type_traits signature cannot reach. A uniform
+// fixed-level decoder here would be a trap: for a mode-0 (uniform) expert it
+// coincidentally agrees, but for a mode-1 (adaptive) expert it SILENTLY PRODUCES
+// WRONG VALUES, so any generic CPU op, offload or tool path would quietly corrupt
+// adaptive experts instead of refusing an operation it cannot perform. Aborting is
+// the only correct generic behaviour; the real decoders are the dedicated CUDA/HIP
+// paths and the registry-aware to_fp16 shim (ggml-cuda/rocmfp{2,3}_mix.cu).
+static void rocmfpx_mix_to_float_unsupported(const void * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    GGML_UNUSED(x); GGML_UNUSED(y); GGML_UNUSED(k);
+    GGML_ABORT("rocmfpx_mix: generic CPU dequantization is unsupported -- the per-expert "
+               "codebook is out-of-band. Use the CUDA/HIP mix path (mul_mat_id or the "
+               "registry-aware to_fp16 shim).");
+}
+// Symmetric hole: producing one of these types needs a FITTED per-expert codebook plus
+// the sidecar/KV that carries it. A from_float_ref would mint a qtype-105/106 tensor
+// with no codebook at all -- a tensor nothing can decode correctly.
+static void rocmfpx_mix_from_float_unsupported(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    GGML_UNUSED(x); GGML_UNUSED(y); GGML_UNUSED(k);
+    GGML_ABORT("rocmfpx_mix: quantization requires a fitted per-expert codebook and its "
+               "sidecar/KV. These tensors must come from an exporter that fits "
+               "per-expert codebooks and emits them alongside the weights.");
+}
+
 static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
     [GGML_TYPE_I8] = {
         .type_name                = "i8",
@@ -941,6 +965,34 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .blck_size                = 0,
         .type_size                = 0,
         .is_quantized             = false,
+    },
+    [GGML_TYPE_Q3_1_ROCMFP3_MIX] = {
+        // Per-expert mixed absmax/adaptive ROCmFP3 (lucebox wire qtype 105).
+        // 14-byte block: 12 bytes of packed 3-bit codes for 32 weights + 2 meta
+        // bytes (UE4M3 scale per 16-weight half; in adaptive mode the top bit of
+        // each meta byte selects one of two 8-level bf16 codebooks that live
+        // OUT-OF-BAND in GGUF KV / a sidecar). Decode happens in the dedicated
+        // CUDA path; the generic to_float/from_float_ref ABORT -- see
+        // rocmfpx_mix_to_float_unsupported above for why a fixed-level fallback
+        // here is not merely approximate but silently wrong for adaptive experts.
+        .type_name                = "q3_1_rocmfp3_mix",
+        .blck_size                = 32,
+        .type_size                = 14,
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) rocmfpx_mix_to_float_unsupported,
+        .from_float_ref           = (ggml_from_float_t) rocmfpx_mix_from_float_unsupported,
+    },
+    [GGML_TYPE_Q2_1_ROCMFP2_MIX] = {
+        // Per-expert mixed absmax/adaptive ROCmFP2 (lucebox wire qtype 106).
+        // 10-byte block: 8 bytes of packed 2-bit codes for 32 weights + 2 meta
+        // bytes; two 4-level bf16 codebooks per expert travel out-of-band.
+        // Same abort rationale as qtype 105 above.
+        .type_name                = "q2_1_rocmfp2_mix",
+        .blck_size                = 32,
+        .type_size                = 10,
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) rocmfpx_mix_to_float_unsupported,
+        .from_float_ref           = (ggml_from_float_t) rocmfpx_mix_from_float_unsupported,
     },
 };
 

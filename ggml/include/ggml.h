@@ -430,7 +430,11 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_0    = 42,
-        GGML_TYPE_COUNT   = 43,
+        // 43..104 unused: 105/106 keep the lucebox ROCmFPX wire numbering so GGUF
+        // artifacts are interchangeable between the two trees.
+        GGML_TYPE_Q3_1_ROCMFP3_MIX  = 105, // per-expert mixed absmax/adaptive ROCmFP3; codebook out-of-band (GGUF KV / sidecar)
+        GGML_TYPE_Q2_1_ROCMFP2_MIX  = 106, // per-expert mixed absmax/adaptive ROCmFP2; codebook out-of-band (GGUF KV / sidecar)
+        GGML_TYPE_COUNT   = 107,
     };
 
     // precision
