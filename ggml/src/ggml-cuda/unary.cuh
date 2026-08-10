@@ -104,6 +104,19 @@ __device__ __forceinline__ float ggml_cuda_op_gelu_single(float x) {
     return 0.5f * x * (1.0f + tanhf(SQRT_2_OVER_PI * x * (1.0f + GELU_COEF_A * x * x)));
 }
 
+// DeepSeek4 SwiGLU variant used by the ROCmFPX mix-qtype fused kernels
+// (rocmfp2_mix.cu / rocmfp3_mix.cu): gate clamped above by `limit`, up clamped to
+// [-limit, limit], silu applied to the GATE. Vendored from the lucebox tree, where
+// this is the single definition the standalone swiglu_ds4 kernel and the fused
+// gate/up+GLU launches both call, so the two can never diverge numerically.
+__device__ __forceinline__ float ggml_cuda_op_swiglu_ds4_single(float gate, float up, float limit) {
+    gate = fminf(gate, limit);
+    up   = fmaxf(fminf(up, limit), -limit);
+
+    const float silu = gate / (1.0f + expf(-gate));
+    return silu * up;
+}
+
 __device__ __forceinline__ float ggml_cuda_op_swiglu_oai_single(float x, float g, float alpha = 1.702f, float limit = 7.0f) {
     x = fminf(x, limit);
     g = fmaxf(fminf(g, limit), -limit);
