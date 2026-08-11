@@ -3,6 +3,7 @@
 #include "llama-impl.h"
 
 #include "ggml.h"
+#include "ggml-backend.h"
 #include "gguf.h"
 
 #include <cstring>
@@ -172,6 +173,15 @@ void llama_rocmfpx_mix_register_tensors(
         }
         if (!ggml_is_contiguous(t)) {
             throw std::runtime_error("rocmfpx-mix: '" + name + "' is not contiguous");
+        }
+        if (t->buffer && ggml_backend_buffer_is_host(t->buffer)) {
+            // A host-resident mix tensor would be copied to the GPU under a
+            // DIFFERENT pointer at eval time, missing the registry and hitting
+            // the decode-time abort. Refuse at load, where the fix is clear.
+            throw std::runtime_error("rocmfpx-mix: '" + name + "' resides in host buffer '"
+                                     + ggml_backend_buffer_name(t->buffer) + "' — the mix qtypes "
+                                     "decode only on the CUDA backend; offload every layer that "
+                                     "carries a qtype-105/106 tensor (increase -ngl)");
         }
         matched.insert(name);
     }
