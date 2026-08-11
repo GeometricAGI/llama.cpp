@@ -7,6 +7,7 @@
 #include "llama-mmap.h"
 #include "llama-cparams.h"
 #include "llama-model-loader.h"
+#include "llama-rocmfpx-mix.h"
 
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
@@ -1046,6 +1047,9 @@ struct llama_model::impl {
     bool has_tensor_overrides;
 
     std::vector<float> tensor_split_owned;
+
+    // ROCmFPX mix qtype (105/106) codebook registrations, undone at model free
+    llama_rocmfpx_mix_registrations rocmfpx_mix_regs;
 };
 
 llama_model::llama_model(const llama_model_params & params) : params(params), pimpl(std::make_unique<impl>()) {
@@ -1059,6 +1063,10 @@ llama_model::llama_model(const llama_model_params & params) : params(params), pi
 }
 
 llama_model::~llama_model() {
+    // undo the ROCmFPX mix codebook registrations before the weight buffers
+    // (whose base pointers key the registry) are freed
+    llama_rocmfpx_mix_unregister_all(pimpl->rocmfpx_mix_regs);
+
     for (auto * lora : loras) {
         delete lora;
     }
@@ -1667,6 +1675,25 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     if (use_mmap_buffer) {
         for (auto & mapping : ml.mappings) {
             pimpl->mappings.emplace_back(std::move(mapping));
+        }
+    }
+
+    // ROCmFPX mix qtypes (105/106) decode against per-tensor codebooks that live
+    // in the "geoquant.dmix2.sidecar" GGUF KV, not in the tensor data — an
+    // unregistered 105/106 decode aborts, so the sidecar is validated (exact
+    // 1:1 cover of the resident mix tensors) and registered HERE, where a
+    // violation can still fail the load with a clear message.
+    {
+        std::vector<ggml_tensor *> mix_tensors;
+        for (auto & [ctx, _] : ctx_buf_maps) {
+            for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+                if (t->type == GGML_TYPE_Q3_1_ROCMFP3_MIX || t->type == GGML_TYPE_Q2_1_ROCMFP2_MIX) {
+                    mix_tensors.push_back(t);
+                }
+            }
+        }
+        if (!mix_tensors.empty()) {
+            llama_rocmfpx_mix_register_tensors(ml.metadata, mix_tensors, pimpl->rocmfpx_mix_regs);
         }
     }
 

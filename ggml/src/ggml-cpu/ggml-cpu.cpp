@@ -428,6 +428,17 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
         return true;
     }
 
+    // ROCmFPX mix qtypes (105/106) decode against out-of-band codebooks the CPU
+    // backend cannot reach — the generic type traits abort by design. Refuse
+    // every real op on them (a clean supports_op refusal instead of a crash);
+    // the CUDA backend claims MUL_MAT / MUL_MAT_ID for these types.
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        if (op->src[i] && (op->src[i]->type == GGML_TYPE_Q3_1_ROCMFP3_MIX ||
+                           op->src[i]->type == GGML_TYPE_Q2_1_ROCMFP2_MIX)) {
+            return false;
+        }
+    }
+
     // check extra buffer types
     // note: only the first sources are checked for extra buffer types to reduce overhead, increase if necessary
     for (int i = 0; i < 4; i++) {
