@@ -1791,7 +1791,21 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
                                    ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) &&
                                    src0->view_src;
 
-    bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear && src1->type == GGML_TYPE_F32 &&
+    // ggml_is_quantized() is TRUE for the ROCmFPX mix qtypes, but they have no
+    // MMVQ kernel at all -- their codebooks live in an out-of-band registry the
+    // block-local quant kernels cannot reach, which is why
+    // ggml_cuda_should_use_mmvq() returns false for them. That guard covers the
+    // unfused dispatch; this fusion gate did not consult it, so a fused
+    // gate/up (SwiGLU) or gated-attention matvec carrying a mix-qtype src0
+    // reached mul_mat_vec_q anyway and hit its default GGML_ABORT("fatal
+    // error"). Observed on Qwen3.5/3.8, where the allocator placed
+    // rocmfp2_mix on ffn_gate across 43 layers: the model loaded, generated a
+    // few tokens, then aborted at mmvq.cu. Fusion cannot be a way in to a
+    // kernel the unfused path already refuses.
+    const bool mix_qtype = src0->type == GGML_TYPE_Q3_1_ROCMFP3_MIX ||
+                           src0->type == GGML_TYPE_Q2_1_ROCMFP2_MIX;
+
+    bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !mix_qtype && !bad_padding_clear && src1->type == GGML_TYPE_F32 &&
                              dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
 
     // fusion is not universally faster on Pascal
