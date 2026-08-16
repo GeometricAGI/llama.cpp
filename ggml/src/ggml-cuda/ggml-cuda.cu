@@ -33,6 +33,7 @@
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
 #include "ggml-cuda/rocmfp3_mix.cuh"
+#include "ggml-cuda/gqh.cuh"
 #include "ggml-cuda/rocmfp2_mix.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
@@ -1791,21 +1792,18 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
                                    ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) &&
                                    src0->view_src;
 
-    // ggml_is_quantized() is TRUE for the ROCmFPX mix qtypes, but they have no
-    // MMVQ kernel at all -- their codebooks live in an out-of-band registry the
-    // block-local quant kernels cannot reach, which is why
-    // ggml_cuda_should_use_mmvq() returns false for them. That guard covers the
-    // unfused dispatch; this fusion gate did not consult it, so a fused
-    // gate/up (SwiGLU) or gated-attention matvec carrying a mix-qtype src0
-    // reached mul_mat_vec_q anyway and hit its default GGML_ABORT("fatal
-    // error"). Observed on Qwen3.5/3.8, where the allocator placed
-    // rocmfp2_mix on ffn_gate across 43 layers: the model loaded, generated a
-    // few tokens, then aborted at mmvq.cu. Fusion cannot be a way in to a
-    // kernel the unfused path already refuses.
-    const bool mix_qtype = src0->type == GGML_TYPE_Q3_1_ROCMFP3_MIX ||
-                           src0->type == GGML_TYPE_Q2_1_ROCMFP2_MIX;
+    // ggml_is_quantized() is TRUE for the mix and GQH qtypes, but they have no
+    // MMVQ kernel at all, which is why ggml_cuda_should_use_mmvq() returns false
+    // for them. That guard covers the unfused dispatch; this fusion gate did not
+    // consult it, so a fused gate/up (SwiGLU) or gated-attention matvec carrying
+    // such a src0 reached mul_mat_vec_q anyway and hit its default
+    // GGML_ABORT("fatal error"). Observed on Qwen3.5/3.8, where the allocator
+    // placed rocmfp2_mix on ffn_gate across 43 layers: the model loaded,
+    // generated a few tokens, then aborted at mmvq.cu. Fusion cannot be a way in
+    // to a kernel the unfused path already refuses.
+    const bool no_mmvq = ggml_cuda_qtype_has_no_mmvq(src0->type);
 
-    bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !mix_qtype && !bad_padding_clear && src1->type == GGML_TYPE_F32 &&
+    bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !no_mmvq && !bad_padding_clear && src1->type == GGML_TYPE_F32 &&
                              dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
 
     // fusion is not universally faster on Pascal
@@ -1883,6 +1881,30 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         if (handled) {
             return;
         }
+    }
+
+    // GQH fused decode matvec, same shape of hook as the mix qtypes above: the
+    // generic chain would dequantize the whole weight matrix to f16 per token.
+    // Returns false for an unregistered tensor, keeping the fallback.
+    // GGML_GQH_FUSED=0 forces the dequant path, for A/B measurement.
+    static const bool gqh_fused_on = []() {
+        const char * e = getenv("GGML_GQH_FUSED");
+        return e ? atoi(e) != 0 : true;
+    }();
+
+    if (gqh_fused_on
+            && (src0->type == GGML_TYPE_GQH3 || src0->type == GGML_TYPE_GQH2_H
+            || src0->type == GGML_TYPE_GQH2_C)
+            && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32
+            && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)
+            && src1->ne[2] == 1 && src1->ne[3] == 1
+            && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE
+            && ggml_cuda_gqh_mul_mat_vec(
+                  src0->type, src0->data, (const float *) src1->data, (float *) dst->data,
+                  (int) src0->ne[0], (int) src0->ne[1], (int) src1->ne[1],
+                  (int64_t) (src1->nb[1] / sizeof(float)),
+                  (int64_t) (dst->nb[1] / sizeof(float)), ctx.stream())) {
+        return;
     }
 
     // 3-D batched slice (e.g. a weight reshaped to [in, out/g, g] and mul_mat'd
@@ -5080,6 +5102,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     // traits deliberately abort (out-of-band codebooks).
                     case GGML_TYPE_Q3_1_ROCMFP3_MIX:
                     case GGML_TYPE_Q2_1_ROCMFP2_MIX:
+                    // GQH: same reason -- decoded by the registry-aware
+                    // dequant->cuBLAS path in gqh.cu.
+                    case GGML_TYPE_GQH3:
+                    case GGML_TYPE_GQH2_H:
+                    case GGML_TYPE_GQH2_C:
                         return true;
                     default:
                         return false;

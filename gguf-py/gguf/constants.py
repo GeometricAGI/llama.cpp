@@ -5040,6 +5040,10 @@ class GGMLQuantizationType(IntEnum):
     NVFP4   = 40
     Q1_0    = 41
     Q2_0    = 42
+    # 105-107 are the lucebox ROCmFPX wire numbers; GQH continues from 108.
+    GQH3    = 108
+    GQH2_H  = 109
+    GQH2_C  = 110
 
 
 class ExpertGatingFuncType(IntEnum):
@@ -5228,6 +5232,11 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.NVFP4:   (64, 4 + 32),
     GGMLQuantizationType.Q1_0:    (128, 2 + 16),
     GGMLQuantizationType.Q2_0:    (64, 2 + 16),
+    # GQH superblock is 256 weights; the 5-byte per-tensor header is NOT part of
+    # the tensor data (it rides in the "geoquant.gqh.headers" KV).
+    GGMLQuantizationType.GQH3:    (256, 105),
+    GGMLQuantizationType.GQH2_H:  (256, 73),
+    GGMLQuantizationType.GQH2_C:  (256, 66),
 }
 
 

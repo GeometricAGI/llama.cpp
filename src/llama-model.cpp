@@ -8,6 +8,7 @@
 #include "llama-cparams.h"
 #include "llama-model-loader.h"
 #include "llama-rocmfpx-mix.h"
+#include "llama-gqh.h"
 
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
@@ -1050,6 +1051,9 @@ struct llama_model::impl {
 
     // ROCmFPX mix qtype (105/106) codebook registrations, undone at model free
     llama_rocmfpx_mix_registrations rocmfpx_mix_regs;
+
+    // GQH qtype (108/109) per-tensor header registrations, undone at model free
+    llama_gqh_registrations gqh_regs;
 };
 
 llama_model::llama_model(const llama_model_params & params) : params(params), pimpl(std::make_unique<impl>()) {
@@ -1066,6 +1070,7 @@ llama_model::~llama_model() {
     // undo the ROCmFPX mix codebook registrations before the weight buffers
     // (whose base pointers key the registry) are freed
     llama_rocmfpx_mix_unregister_all(pimpl->rocmfpx_mix_regs);
+    llama_gqh_unregister_all(pimpl->gqh_regs);
 
     for (auto * lora : loras) {
         delete lora;
@@ -1694,6 +1699,23 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
         if (!mix_tensors.empty()) {
             llama_rocmfpx_mix_register_tensors(ml.metadata, mix_tensors, pimpl->rocmfpx_mix_regs);
+        }
+    }
+
+    // GQH qtypes (108/109) have the same shape of problem: a 5-byte per-tensor
+    // header in the "geoquant.gqh.headers" GGUF KV that a fixed-size ggml block
+    // cannot hold. Validate and register it here for the same reason.
+    {
+        std::vector<ggml_tensor *> gqh_tensors;
+        for (auto & [ctx, _] : ctx_buf_maps) {
+            for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+                if (t->type == GGML_TYPE_GQH3 || t->type == GGML_TYPE_GQH2_H) {
+                    gqh_tensors.push_back(t);
+                }
+            }
+        }
+        if (!gqh_tensors.empty()) {
+            llama_gqh_register_tensors(ml.metadata, gqh_tensors, pimpl->gqh_regs);
         }
     }
 

@@ -9,6 +9,7 @@
 
 // FIXME: required here for quantization functions
 #include "ggml-quants.h"
+#include "gqh.h"
 
 #ifdef GGML_USE_CPU_HBM
 #include <hbwmalloc.h>
@@ -652,6 +653,15 @@ static void rocmfpx_mix_from_float_unsupported(const float * GGML_RESTRICT x, vo
                "per-expert codebooks and emits them alongside the weights.");
 }
 
+// Minting a GQH tensor needs the encoder's per-tensor grid search and its header KV,
+// so a from_float_ref would produce a tensor nothing can decode. Decoding is fine
+// (see gqh.cpp); only the quantize direction is missing.
+static void gqh_from_float_unsupported(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    GGML_UNUSED(x); GGML_UNUSED(y); GGML_UNUSED(k);
+    GGML_ABORT("gqh: quantization requires the geo-quant encoder (per-tensor grid search "
+               "plus the header KV it emits).");
+}
+
 static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
     [GGML_TYPE_I8] = {
         .type_name                = "i8",
@@ -993,6 +1003,42 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .is_quantized             = true,
         .to_float                 = (ggml_to_float_t) rocmfpx_mix_to_float_unsupported,
         .from_float_ref           = (ggml_from_float_t) rocmfpx_mix_from_float_unsupported,
+    },
+    [GGML_TYPE_GQH3] = {
+        // GQH 3-bit rung (3.28125 bpw). 105-byte superblock for 256 weights:
+        // 1 byte E4M3 scale, 8 bytes of 16 uint4 sub-block ratios, then the codes
+        // split into a 64-byte low-2-bit plane and a 32-byte high-1-bit plane.
+        .type_name                = "gqh3",
+        .blck_size                = 256,
+        .type_size                = 105,
+        .is_quantized             = true,
+        // to_float resolves the per-tensor header from the gqh.cpp registry.
+        .to_float                 = (ggml_to_float_t) dequantize_row_gqh3,
+        .from_float_ref           = (ggml_from_float_t) gqh_from_float_unsupported,
+    },
+    [GGML_TYPE_GQH2_H] = {
+        // GQH 2-bit rung (2.28125 bpw). Same head as gqh3, then 64 bytes of uint2
+        // codes into a 4-level grid {-1, -a, +a, +1} picked per tensor.
+        .type_name                = "gqh2_h",
+        .blck_size                = 256,
+        .type_size                = 73,
+        .is_quantized             = true,
+        // Same header registry as gqh3.
+        .to_float                 = (ggml_to_float_t) dequantize_row_gqh2_h,
+        .from_float_ref           = (ggml_from_float_t) gqh_from_float_unsupported,
+    },
+    [GGML_TYPE_GQH2_C] = {
+        // GQH codebook rung (2.0625 bpw). 66-byte superblock: fp16 scale then 8
+        // blocks of 32, each a uint32 of four 7-bit sign indices plus a uint4 ratio
+        // and four codebook indices. No per-tensor header, but the frozen (256,8)
+        // codebook only exists in the CUDA path, so the generic hooks still abort.
+        .type_name                = "gqh2_c",
+        .blck_size                = 256,
+        .type_size                = 66,
+        .is_quantized             = true,
+        // No registry: fp16 scale in-block, frozen codebook and sign table.
+        .to_float                 = (ggml_to_float_t) dequantize_row_gqh2_c,
+        .from_float_ref           = (ggml_from_float_t) gqh_from_float_unsupported,
     },
 };
 

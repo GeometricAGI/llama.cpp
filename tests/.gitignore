@@ -1,6 +1,7 @@
 *
 !*.*
 !snapshots/
+!gqh-vectors/
 *.o
 ggml-common.h
 **/*.swp

@@ -1,4 +1,5 @@
 #include "convert.cuh"
+#include "gqh.cuh"
 #include "dequantize.cuh"
 #include "rocmfp3_mix.cuh"
 #include "rocmfp2_mix.cuh"
@@ -571,6 +572,14 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_rocmfp3_mix_to_fp16_cuda;
         case GGML_TYPE_Q2_1_ROCMFP2_MIX:
             return dequantize_rocmfp2_mix_to_fp16_cuda;
+        // GQH: the per-tensor scale + grid code come from the header registry
+        // (gqh.cu), for the same reason.
+        case GGML_TYPE_GQH3:
+            return dequantize_gqh3_to_fp16_cuda;
+        case GGML_TYPE_GQH2_H:
+            return dequantize_gqh2h_to_fp16_cuda;
+        case GGML_TYPE_GQH2_C:
+            return dequantize_gqh2c_to_fp16_cuda;
         case GGML_TYPE_F32:
             return convert_unary_cont_cuda<float>;
         case GGML_TYPE_BF16:
@@ -628,6 +637,12 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
             return dequantize_row_nvfp4_cuda;
+        case GGML_TYPE_GQH3:
+            return dequantize_gqh3_to_fp32_cuda;
+        case GGML_TYPE_GQH2_H:
+            return dequantize_gqh2h_to_fp32_cuda;
+        case GGML_TYPE_GQH2_C:
+            return dequantize_gqh2c_to_fp32_cuda;
         case GGML_TYPE_F16:
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_BF16:

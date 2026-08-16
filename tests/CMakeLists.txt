@@ -338,6 +338,26 @@ endif()
 # geoquant-packed inputs; self-skips without a GPU or the CUDA mix registry)
 llama_build(test-rocmfpx-mix-decode.cpp)
 
+# GQH qtype registration + decode bit-identity, against the vendored geo-quant
+# test vectors. Self-skips without a GPU or the CUDA GQH registry.
+foreach(GQH_CASE "gqh3;1;256" "gqh3;4;512" "gqh3;64;1024"
+                 "gqh2_h;1;256" "gqh2_h;4;512" "gqh2_h;64;1024"
+                 "gqh2_c;1;256" "gqh2_c;4;512" "gqh2_c;64;1024")
+    list(GET GQH_CASE 0 GQH_RUNG)
+    list(GET GQH_CASE 1 GQH_ROWS)
+    list(GET GQH_CASE 2 GQH_COLS)
+    set(GQH_STEM "${CMAKE_CURRENT_SOURCE_DIR}/gqh-vectors/${GQH_RUNG}_${GQH_ROWS}x${GQH_COLS}")
+    set(GQH_ARGS ${GQH_RUNG} ${GQH_ROWS} ${GQH_COLS} "${GQH_STEM}.wire.bin" "${GQH_STEM}.decode.f32")
+
+    llama_build_and_test(test-gqh-cpu-decode.cpp
+        NAME test-gqh-cpu-${GQH_RUNG}-${GQH_ROWS}x${GQH_COLS}
+        ARGS ${GQH_ARGS})
+
+    llama_build_and_test(test-gqh-backend.cpp
+        NAME test-gqh-backend-${GQH_RUNG}-${GQH_ROWS}x${GQH_COLS}
+        ARGS ${GQH_ARGS})
+endforeach()
+
 llama_build(test-export-graph-ops.cpp)
 if (TARGET gguf-model-data)
     target_link_libraries(test-export-graph-ops PRIVATE gguf-model-data)

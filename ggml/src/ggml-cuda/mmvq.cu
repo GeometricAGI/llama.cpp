@@ -245,14 +245,31 @@ static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna4(ggml_type
     }
 }
 
+// ggml_is_quantized() is true for these, but mul_mat_vec_q has no case for them
+// and falls into its default GGML_ABORT. The ROCmFPX mix qtypes read a per-expert
+// codebook from an out-of-band registry that a block-local quant kernel cannot
+// reach; GQH simply has no vec_dot yet. EVERY path that can reach mul_mat_vec_q
+// must consult this -- the unfused dispatch, the MUL_MAT_ID batch cap, and the
+// fusion gate in ggml-cuda.cu. A fused matvec that skipped it is what made
+// Qwen3.5/3.8 abort at mmvq.cu after a few tokens.
+bool ggml_cuda_qtype_has_no_mmvq(enum ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q3_1_ROCMFP3_MIX:
+        case GGML_TYPE_Q2_1_ROCMFP2_MIX:
+        case GGML_TYPE_GQH3:
+        case GGML_TYPE_GQH2_H:
+        case GGML_TYPE_GQH2_C:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Host function: returns the max batch size for the current arch+type at runtime.
 int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
-    // ROCmFPX mix qtypes have no MMVQ kernel: their learned per-expert codebooks
-    // live in an out-of-band registry the block-local quant kernels cannot reach.
     // Checked before the NVIDIA always-MMVQ shortcut below, which would otherwise
-    // route them into a kernel that does not exist. They take the dedicated fused
-    // path or the dequant->cuBLAS fallback instead.
-    if (type == GGML_TYPE_Q3_1_ROCMFP3_MIX || type == GGML_TYPE_Q2_1_ROCMFP2_MIX) {
+    // route these into a kernel that does not exist.
+    if (ggml_cuda_qtype_has_no_mmvq(type)) {
         return 0;
     }
     // NVIDIA: Volta, Ada Lovelace, and Blackwell always use MMVQ for MUL_MAT_ID.
@@ -291,9 +308,7 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
     if (!ggml_is_quantized(type)) {
         return false;
     }
-    // No MMVQ kernel for the ROCmFPX mix qtypes (out-of-band codebooks); see
-    // get_mmvq_mmid_max_batch above.
-    if (type == GGML_TYPE_Q3_1_ROCMFP3_MIX || type == GGML_TYPE_Q2_1_ROCMFP2_MIX) {
+    if (ggml_cuda_qtype_has_no_mmvq(type)) {
         return false;
     }
     if (GGML_CUDA_CC_IS_CDNA(cc)) {

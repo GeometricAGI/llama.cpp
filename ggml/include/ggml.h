@@ -434,7 +434,12 @@ extern "C" {
         // artifacts are interchangeable between the two trees.
         GGML_TYPE_Q3_1_ROCMFP3_MIX  = 105, // per-expert mixed absmax/adaptive ROCmFP3; codebook out-of-band (GGUF KV / sidecar)
         GGML_TYPE_Q2_1_ROCMFP2_MIX  = 106, // per-expert mixed absmax/adaptive ROCmFP2; codebook out-of-band (GGUF KV / sidecar)
-        GGML_TYPE_COUNT   = 107,
+        // 107 is GGML_TYPE_Q2_0_ROCMFP2 in the lucebox tree. Left free here so the
+        // two trees keep one wire numbering, same reason as 105/106 above.
+        GGML_TYPE_GQH3    = 108, // GQH 3.28125 bpw; 256-weight superblock, 105 B; 5 B per-tensor header in GGUF KV
+        GGML_TYPE_GQH2_H  = 109, // GQH 2.28125 bpw; 256-weight superblock,  73 B; 5 B per-tensor header in GGUF KV
+        GGML_TYPE_GQH2_C  = 110, // GQH 2.0625  bpw; 256-weight superblock,  66 B; no header (fp16 d in-block)
+        GGML_TYPE_COUNT   = 111,
     };
 
     // precision
@@ -2900,6 +2905,15 @@ extern "C" {
         ggml_to_float_t          to_float;
         ggml_from_float_t        from_float_ref;
     };
+
+    // GQH (108/109) per-tensor header: float32 tensor_scale + uint8 grid code.
+    // A fixed-size ggml block cannot hold the 5-byte prefix the wire puts in front
+    // of the superblock stream, so the loader reads it from GGUF KV and attaches it
+    // to the tensor's data pointer here. Both the CPU decoders and the CUDA
+    // converters resolve it from this one registry. Decoding an unregistered GQH
+    // tensor aborts rather than guessing a scale.
+    GGML_API void ggml_gqh_register(const void * base, size_t nbytes, float tensor_scale, int grid_code);
+    GGML_API void ggml_gqh_unregister(const void * base);
 
     GGML_API const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type);
 
