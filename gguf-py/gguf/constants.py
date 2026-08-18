@@ -5041,6 +5041,9 @@ class GGMLQuantizationType(IntEnum):
     Q1_0    = 41
     Q2_0    = 42
     # 105-107 are the lucebox ROCmFPX wire numbers; GQH continues from 108.
+    Q3_1_ROCMFP3_MIX = 105
+    Q2_1_ROCMFP2_MIX = 106
+    Q2_0_ROCMFP2     = 107
     GQH3    = 108
     GQH2_H  = 109
     GQH2_C  = 110
@@ -5234,6 +5237,10 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.Q2_0:    (64, 2 + 16),
     # GQH superblock is 256 weights; the 5-byte per-tensor header is NOT part of
     # the tensor data (it rides in the "geoquant.gqh.headers" KV).
+    # ROCmFPX mix wire: 32-weight blocks, codebooks out-of-band (GGUF KV / sidecar).
+    GGMLQuantizationType.Q3_1_ROCMFP3_MIX: (32, 14),
+    GGMLQuantizationType.Q2_1_ROCMFP2_MIX: (32, 10),
+    GGMLQuantizationType.Q2_0_ROCMFP2:     (64, 2 + 16),
     GGMLQuantizationType.GQH3:    (256, 105),
     GGMLQuantizationType.GQH2_H:  (256, 73),
     GGMLQuantizationType.GQH2_C:  (256, 66),
