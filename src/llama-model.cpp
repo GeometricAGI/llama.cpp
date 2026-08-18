@@ -1702,14 +1702,15 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    // GQH qtypes (108/109) have the same shape of problem: a 5-byte per-tensor
+    // GQH qtypes (108/109/111) have the same shape of problem: a 5-byte per-tensor
     // header in the "geoquant.gqh.headers" GGUF KV that a fixed-size ggml block
     // cannot hold. Validate and register it here for the same reason.
     {
         std::vector<ggml_tensor *> gqh_tensors;
         for (auto & [ctx, _] : ctx_buf_maps) {
             for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
-                if (t->type == GGML_TYPE_GQH3 || t->type == GGML_TYPE_GQH2_H) {
+                if (t->type == GGML_TYPE_GQH3 || t->type == GGML_TYPE_GQH2_H ||
+                    t->type == GGML_TYPE_GQH4) {
                     gqh_tensors.push_back(t);
                 }
             }

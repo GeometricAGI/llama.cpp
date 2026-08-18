@@ -1,7 +1,7 @@
 #pragma once
 
 // Loader-side support for the GQH qtypes (GGML_TYPE_GQH3 = 108,
-// GGML_TYPE_GQH2_H = 109). Both rungs scale every weight by a 5-byte per-tensor
+// GGML_TYPE_GQH2_H = 109, GGML_TYPE_GQH4 = 111). These rungs scale every weight by a 5-byte per-tensor
 // header (float32 tensor_scale + uint8 grid code) that cannot live in a
 // fixed-size ggml block, so it rides in the "geoquant.gqh.headers" GGUF KV.
 // Decoding an UNREGISTERED GQH tensor aborts, so the KV is read, validated and

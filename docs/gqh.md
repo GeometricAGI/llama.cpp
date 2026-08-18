@@ -1,8 +1,8 @@
-# GQH qtypes (108/109/110)
+# GQH qtypes (108/109/110/111)
 
 GQH (Geo-Quant Hierarchical) is a low-bit weight family from geo-quant, branch
 `feat/custom-format-family`. The authoritative wire spec is
-`geoquant/formats/gqh.py` (`decode3` / `decode` / `decode_c`) and
+`geoquant/formats/gqh.py` (`decode3` / `decode` / `decode_c` / `decode4`) and
 `docs/design-briefs/custom_format_family_SPEC.md` in that repo. This file records
 only what the llama.cpp side owns: the qtype numbers, how the per-tensor header
 travels, and what the exporter must emit.
@@ -12,13 +12,19 @@ travels, and what the exporter must emit.
 | 108 | `gqh3` | 3.28125 | 105 B / 256 weights | yes |
 | 109 | `gqh2_h` | 2.28125 | 73 B / 256 weights | yes |
 | 110 | `gqh2_c` | 2.0625 | 66 B / 256 weights | no (fp16 `d` in-block) |
+| 111 | `gqh4` | 4.28125 | 137 B / 256 weights | yes |
+
+111 is the widest rung, added for the 32 GB / full-context band. It is `gqh3` one
+bit up and the simplest decode in the family: E4M3 `d` (1 B), 16 uint4 sub-block
+ratios (8 B), then 256 uint4 codes packed two per byte (128 B, even weight in the
+low nibble) into a 16-level grid `±(j/8)^gamma`, `j = 1..8`. No bit-planes.
 
 107 is `GGML_TYPE_Q2_0_ROCMFP2` in the lucebox tree. It is left free here so both
 trees keep one wire numbering, the same reason 105/106 carry lucebox's numbers.
 
 ## The per-tensor header
 
-`gqh3` and `gqh2_h` scale every weight by a 5-byte header -- `float32
+`gqh4`, `gqh3` and `gqh2_h` scale every weight by a 5-byte header -- `float32
 tensor_scale` then `uint8 grid_code` -- that the standalone wire puts in front of
 the superblock stream. A ggml block is fixed-size, so a 5-byte prefix cannot live
 in the tensor data. It travels in GGUF KV instead.
@@ -33,15 +39,15 @@ A `u8` array. Parsed by `src/llama-gqh.cpp`, written by
 
 ```
 header : magic "GQHh1\0\0\0" (8) | entry_count u32 | reserved u32 (=0)
-entry  : name_len u32 | name utf-8 | qtype u32 (108|109)
+entry  : name_len u32 | name utf-8 | qtype u32 (108|109|111)
          | tensor_scale f32 LE | grid_code u8 | pad[3] (=0)
 ```
 
-`grid_code` indexes `GAMMA_GRID` for 108 and `A_GRID` for 109, both length 12.
+`grid_code` indexes `GAMMA_GRID` for 108 and 111 and `A_GRID` for 109, all length 12.
 
 The cover is checked in ONE direction only, and the asymmetry is deliberate:
 
-- Every resident 108/109 tensor MUST have an entry. Without one it aborts at
+- Every resident 108/109/111 tensor MUST have an entry. Without one it aborts at
   decode, so the load fails and names the tensor.
 - An entry with no resident tensor is EXPECTED and only logged. MTP-block tensors
   are created with `TENSOR_SKIP` unless the context is an MTP one (`load_mtp` is
@@ -73,8 +79,8 @@ there -- it is in `ggml/src/gqh.cpp` (ggml-base), so `src/llama-gqh.cpp` calls
 `ggml_gqh_register` directly instead of the `dlsym` dance `llama-rocmfpx-mix.cpp`
 needs for its backend-local registry.
 
-All three rungs dequantize to f16/f32, so prefill takes the dequant -> cuBLAS
-path. gqh3 and gqh2_h additionally have a FUSED batch-1 matvec
+All four rungs dequantize to f16/f32, so prefill takes the dequant -> cuBLAS
+path. All four additionally have a FUSED batch-1 matvec
 (`ggml_cuda_gqh_mul_mat_vec`), hooked in `ggml_cuda_mul_mat` for
 `src1->ne[1] <= MMVQ_MAX_BATCH_SIZE`, which decodes inline instead of
 materialising the whole weight matrix per token.
@@ -150,6 +156,17 @@ the low-2-bit plane and 1 byte of the high-1-bit plane and the warp covers
   LDC 78 -> 15, tg 197 -> 296 t/s.
 - `ratio/15` is indexed by the lane's sub-block, so it is divergent too. In LDS
   its 16 consecutive floats land in 16 distinct banks, conflict-free.
+
+`gqh4` takes the LDS route rather than the register select. The register trick
+scales with the magnitude count: gqh3's 4 magnitudes cost 3 selects, gqh4's 8 cost
+7. Its 16 signed levels are staged into LDS alongside `s_ratio` instead -- same
+argument as the ratio table, 16 consecutive floats over 16 distinct banks with one
+address each, so the divergent read broadcasts conflict-free. gqh3 and gqh2_h keep
+the register path untouched, so their codegen and their bit-exactness are
+unchanged by 111 landing. A lane's 8 gqh4 codes are one unaligned 32-bit read at
+`9 + lane*4` (`memcpy`, like gqh3's uint16, so the compiler may pick byte loads
+rather than emit an access that faults on AMD), and code `t` is `(u >> 4*t) & 0xf`
+in either nibble order.
 
 Measured on Qwen2.5-1.5B (all 196 weight matrices at gqh3), H100, tg64:
 dequant -> cuBLAS 118.2 t/s, fused 318.9 t/s (2.70x), F16 424.1 t/s. That is

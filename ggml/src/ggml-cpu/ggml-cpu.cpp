@@ -432,7 +432,7 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
     // backend cannot reach — the generic type traits abort by design. Refuse
     // every real op on them (a clean supports_op refusal instead of a crash);
     // the CUDA backend claims MUL_MAT / MUL_MAT_ID for these types.
-    // GQH (108/109/110) CAN dequantize on the CPU (gqh.cpp), but MUL_MAT needs
+    // GQH (108/109/110/111) CAN dequantize on the CPU (gqh.cpp), but MUL_MAT needs
     // type_traits_cpu.vec_dot, which these types do not have -- it is NULL, so a
     // node reaching the CPU backend would call through a null pointer. Refuse
     // until a vec_dot exists.
@@ -441,7 +441,8 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
                            op->src[i]->type == GGML_TYPE_Q2_1_ROCMFP2_MIX ||
                            op->src[i]->type == GGML_TYPE_GQH3   ||
                            op->src[i]->type == GGML_TYPE_GQH2_H ||
-                           op->src[i]->type == GGML_TYPE_GQH2_C)) {
+                           op->src[i]->type == GGML_TYPE_GQH2_C ||
+                           op->src[i]->type == GGML_TYPE_GQH4)) {
             return false;
         }
     }

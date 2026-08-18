@@ -1894,7 +1894,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
 
     if (gqh_fused_on
             && (src0->type == GGML_TYPE_GQH3 || src0->type == GGML_TYPE_GQH2_H
-            || src0->type == GGML_TYPE_GQH2_C)
+            || src0->type == GGML_TYPE_GQH2_C || src0->type == GGML_TYPE_GQH4)
             && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32
             && ggml_is_contiguous(src1) && ggml_is_contiguous(dst)
             && src1->ne[2] == 1 && src1->ne[3] == 1
@@ -5107,6 +5107,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_GQH3:
                     case GGML_TYPE_GQH2_H:
                     case GGML_TYPE_GQH2_C:
+                    case GGML_TYPE_GQH4:
                         return true;
                     default:
                         return false;

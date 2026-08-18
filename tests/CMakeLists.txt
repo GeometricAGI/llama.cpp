@@ -342,7 +342,8 @@ llama_build(test-rocmfpx-mix-decode.cpp)
 # test vectors. Self-skips without a GPU or the CUDA GQH registry.
 foreach(GQH_CASE "gqh3;1;256" "gqh3;4;512" "gqh3;64;1024"
                  "gqh2_h;1;256" "gqh2_h;4;512" "gqh2_h;64;1024"
-                 "gqh2_c;1;256" "gqh2_c;4;512" "gqh2_c;64;1024")
+                 "gqh2_c;1;256" "gqh2_c;4;512" "gqh2_c;64;1024"
+                 "gqh4;1;256" "gqh4;4;512" "gqh4;64;1024")
     list(GET GQH_CASE 0 GQH_RUNG)
     list(GET GQH_CASE 1 GQH_ROWS)
     list(GET GQH_CASE 2 GQH_COLS)
@@ -357,6 +358,12 @@ foreach(GQH_CASE "gqh3;1;256" "gqh3;4;512" "gqh3;64;1024"
         NAME test-gqh-backend-${GQH_RUNG}-${GQH_ROWS}x${GQH_COLS}
         ARGS ${GQH_ARGS})
 endforeach()
+
+# The GQH header-KV parser, model-free. Compiles src/llama-gqh.cpp into the test:
+# the symbol is loader-internal, and this is the only qtype-specific gate in the
+# loader, so it needs coverage that does not require a multi-GB artifact.
+llama_build_and_test(test-gqh-headers.cpp ${PROJECT_SOURCE_DIR}/src/llama-gqh.cpp)
+target_include_directories(test-gqh-headers PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
 llama_build(test-export-graph-ops.cpp)
 if (TARGET gguf-model-data)

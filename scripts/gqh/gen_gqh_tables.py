@@ -49,6 +49,9 @@ e4m3 = torch.arange(256, dtype=torch.uint8).view(torch.float8_e4m3fn).float().nu
 grid3 = [gqh._grid3(float(g)) for g in gqh.GAMMA_GRID]
 assert len(gqh.GAMMA_GRID) == 12
 
+# --- gqh4: 12 gamma codes -> 16 sorted grid levels, +-(j/8)^gamma -----------
+grid4 = [gqh._grid4(float(g)) for g in gqh.GAMMA_GRID]
+
 # --- gqh2_h: 12 a codes -> 4 grid levels {-1,-a,+a,+1} ----------------------
 grid2 = [np.array([-1.0, -float(a), float(a), 1.0], np.float32) for a in gqh.A_GRID]
 assert len(gqh.A_GRID) == 12
@@ -68,7 +71,7 @@ src = f'''#pragma once
 // bit patterns so the compiler cannot re-round them; recomputing e.g.
 // powf(k/4, gamma) on device drifts by an ULP and breaks bit-exact parity.
 //
-// reference: gqh._e4m3_decode, gqh._grid3/GAMMA_GRID, gqh.A_GRID,
+// reference: gqh._e4m3_decode, gqh._grid3/_grid4/GAMMA_GRID, gqh.A_GRID,
 //            gqh._codebook, gqh._sign_tables
 // torch {torch.__version__}, numpy {np.__version__}
 
@@ -83,6 +86,7 @@ src = f'''#pragma once
 #define GQH3_SB_BYTES    {gqh.SB_BYTES_3}
 #define GQH2H_SB_BYTES    {gqh.SB_BYTES}
 #define GQH2C_SB_BYTES    {gqh.GQH2C_BYTES_PER_SB}
+#define GQH4_SB_BYTES    {gqh.SB_BYTES_4}
 #define GQH_GRID_CODES    {len(gqh.GAMMA_GRID)}  // GAMMA_GRID / A_GRID length
 #define GQH2C_GROUP        {gqh.CB_GROUP}  // weights per codebook group
 #define GQH2C_BLOCK       {gqh.C_BLOCK}  // weights per gqh2_c scale block
@@ -97,6 +101,9 @@ src = f'''#pragma once
 
 {table("GQH3_GRID", grid3, 8,
        "gqh3: GAMMA_GRID[code] -> _grid3(gamma), 8 levels sorted ascending")}
+
+{table("GQH4_GRID", grid4, 16,
+       "gqh4: GAMMA_GRID[code] -> _grid4(gamma), 16 levels sorted ascending")}
 
 {table("GQH2H_GRID", grid2, 4,
        "gqh2_h: A_GRID[code] -> {-1, -a, +a, +1}")}

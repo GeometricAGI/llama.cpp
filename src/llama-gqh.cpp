@@ -18,7 +18,7 @@
 // branch feat/custom-format-family):
 //   KV key : "geoquant.gqh.headers" (u8 array)
 //   header : magic "GQHh1\0\0\0" (8) | entry_count u32 | reserved u32 (=0)
-//   entry  : name_len u32 | name utf-8 | qtype u32 (108|109)
+//   entry  : name_len u32 | name utf-8 | qtype u32 (108|109|111)
 //            | tensor_scale f32 LE | grid_code u8 | pad[3] (=0)
 // These are the same 5 bytes that prefix the tensor payload in the standalone
 // wire (geoquant.formats.gqh encode3/encode); the GGUF tensor data is that wire
@@ -41,7 +41,7 @@ struct gqh_entry {
 };
 
 static bool gqh_qtype_has_header(int32_t qtype) {
-    return qtype == GGML_TYPE_GQH3 || qtype == GGML_TYPE_GQH2_H;
+    return qtype == GGML_TYPE_GQH3 || qtype == GGML_TYPE_GQH2_H || qtype == GGML_TYPE_GQH4;
 }
 
 static std::map<std::string, gqh_entry> gqh_parse(const uint8_t * blob, size_t n) {
@@ -85,7 +85,7 @@ static std::map<std::string, gqh_entry> gqh_parse(const uint8_t * blob, size_t n
         }
         off += 12;
         if (!gqh_qtype_has_header((int32_t) qtype)) {
-            return fail("'" + name + "': qtype " + std::to_string(qtype) + " is not 108/109");
+            return fail("'" + name + "': qtype " + std::to_string(qtype) + " is not 108/109/111");
         }
         if (grid_code >= GQH_GRID_CODES) {
             return fail("'" + name + "': grid code " + std::to_string(grid_code)
@@ -121,7 +121,7 @@ void llama_gqh_register_tensors(
 
     const int64_t kid = gguf_find_key(meta, GQH_KV_KEY);
     if (kid < 0) {
-        throw std::runtime_error(std::string("gqh: model carries qtype-108/109 tensors but no '")
+        throw std::runtime_error(std::string("gqh: model carries qtype-108/109/111 tensors but no '")
                                  + GQH_KV_KEY + "' KV -- their per-tensor scale and grid code are "
                                  "out-of-band and the tensors cannot be decoded without it");
     }
@@ -170,7 +170,7 @@ void llama_gqh_register_tensors(
             throw std::runtime_error("gqh: '" + name + "' resides in host buffer '"
                                      + ggml_backend_buffer_name(t->buffer) + "' -- GQH decodes only "
                                      "on the CUDA backend; offload every layer that carries a "
-                                     "qtype-108/109 tensor (increase -ngl)");
+                                     "qtype-108/109/111 tensor (increase -ngl)");
         }
         matched.insert(name);
     }

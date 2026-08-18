@@ -5046,6 +5046,7 @@ class GGMLQuantizationType(IntEnum):
     Q2_0_ROCMFP2     = 107
     GQH3    = 108
     GQH2_H  = 109
+    GQH4    = 111
     GQH2_C  = 110
 
 
@@ -5243,6 +5244,7 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.Q2_0_ROCMFP2:     (64, 2 + 16),
     GGMLQuantizationType.GQH3:    (256, 105),
     GGMLQuantizationType.GQH2_H:  (256, 73),
+    GGMLQuantizationType.GQH4:    (256, 137),
     GGMLQuantizationType.GQH2_C:  (256, 66),
 }
 
