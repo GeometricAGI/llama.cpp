@@ -15,7 +15,7 @@ from each encoded payload and collected into the "geoquant.gqh.headers" KV, whos
 wire is mirrored in src/llama-gqh.cpp.
 
 usage: <geo-quant .venv python> make_gqh_probe.py <in.gguf> <out.gguf>
-           [--rung gqh3|gqh2_h] [--layers N] [--repo PATH]
+           [--rung gqh3|gqh2_h|gqh4] [--layers N] [--repo PATH]
 """
 import argparse
 import struct
@@ -43,7 +43,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("dst")
-    ap.add_argument("--rung", default="gqh3", choices=["gqh3", "gqh2_h"])
+    ap.add_argument("--rung", default="gqh3", choices=["gqh3", "gqh2_h", "gqh4"])
     ap.add_argument("--layers", type=int, default=None,
                     help="only convert tensors in the first N blocks (keeps the probe cheap)")
     ap.add_argument("--repo", default=None, help="path to the geo-quant repo")
@@ -70,6 +70,8 @@ def main():
 
     if args.rung == "gqh3":
         qtype, encode, decode = gguf.GGMLQuantizationType.GQH3, gqh.encode3, gqh.decode3
+    elif args.rung == "gqh4":
+        qtype, encode, decode = gguf.GGMLQuantizationType.GQH4, gqh.encode4, gqh.decode4
     else:
         qtype, encode, decode = gguf.GGMLQuantizationType.GQH2_H, gqh.encode, gqh.decode
 
@@ -95,7 +97,9 @@ def main():
             name.endswith(".weight")
             and len(t.shape) == 2
             and ne0 % SUPERBLOCK == 0
-            and t.tensor_type in (gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16)
+            and t.tensor_type in (gguf.GGMLQuantizationType.F32,
+                                  gguf.GGMLQuantizationType.F16,
+                                  gguf.GGMLQuantizationType.BF16)
             and "token_embd" not in name
             and "output.weight" != name
         )
@@ -109,7 +113,13 @@ def main():
             n_skip += 1
             continue
 
-        w = np.ascontiguousarray(t.data.reshape(ne1, ne0), dtype=np.float32)
+        if t.tensor_type == gguf.GGMLQuantizationType.BF16:
+            # numpy has no bfloat16: widen the raw uint16 into the high half of an
+            # f32. Exact and lossless -- bf16 IS the top 16 bits of f32.
+            raw = t.data.view(np.uint16).reshape(ne1, ne0).astype(np.uint32) << 16
+            w = np.ascontiguousarray(raw.view(np.float32))
+        else:
+            w = np.ascontiguousarray(t.data.reshape(ne1, ne0), dtype=np.float32)
         wire = encode(w)
         scale, code = struct.unpack_from("<fB", wire, 0)
         body = np.frombuffer(wire[5:], dtype=np.uint8)
@@ -140,6 +150,15 @@ def main():
     if headers:
         writer.add_key_value("geoquant.gqh.headers", build_header_kv(headers),
                              gguf.GGUFValueType.ARRAY, sub_type=gguf.GGUFValueType.UINT8)
+
+    if n_gqh == 0:
+        # A probe with no GQH tensor exercises no decode, no registration and no
+        # header cover -- it is indistinguishable from a pass while proving nothing.
+        # Bail before writing rather than emit a plausible-looking artifact.
+        sys.exit(f"{args.dst}: no eligible tensor was converted to {args.rung} "
+                 f"({n_skip} inspected). Eligible = 2-D *.weight, F32/F16/BF16 source, "
+                 f"ne0 %% 256 == 0, not token_embd/output"
+                 + (f", blk index < {args.layers}" if args.layers is not None else ""))
 
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
